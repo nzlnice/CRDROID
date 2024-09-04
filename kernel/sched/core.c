@@ -773,21 +773,6 @@ unsigned int sysctl_sched_uclamp_util_min = 128;
 unsigned int sysctl_sched_uclamp_util_max = SCHED_CAPACITY_SCALE;
 
 /*
- * Ignore uclamp_max for tasks if
- *
- *	runtime < sched_slice() / divider
- *
- * ==>
- *
- *	runtime * divider < sched_slice()
- *
- * where
- *
- *	divider = 1 << sysctl_sched_uclamp_max_filter_divider
- */
-unsigned int sysctl_sched_uclamp_max_filter_divider = 2;
-
-/*
  * By default RT tasks run at the maximum performance point/capacity of the
  * system. Uclamp enforces this by always setting UCLAMP_MIN of RT tasks to
  * SCHED_CAPACITY_SCALE.
@@ -1035,7 +1020,7 @@ unsigned long uclamp_eff_value(struct task_struct *p, enum uclamp_id clamp_id)
  * This "local max aggregation" allows to track the exact "requested" value
  * for each bucket when all its RUNNABLE tasks require the same clamp.
  */
-inline void uclamp_rq_inc_id(struct rq *rq, struct task_struct *p,
+static inline void uclamp_rq_inc_id(struct rq *rq, struct task_struct *p,
 				    enum uclamp_id clamp_id)
 {
 	struct uclamp_rq *uc_rq = &rq->uclamp[clamp_id];
@@ -1073,7 +1058,7 @@ inline void uclamp_rq_inc_id(struct rq *rq, struct task_struct *p,
  * always valid. If it's detected they are not, as defensive programming,
  * enforce the expected state and warn.
  */
-inline void uclamp_rq_dec_id(struct rq *rq, struct task_struct *p,
+static inline void uclamp_rq_dec_id(struct rq *rq, struct task_struct *p,
 				    enum uclamp_id clamp_id)
 {
 	struct uclamp_rq *uc_rq = &rq->uclamp[clamp_id];
@@ -1437,8 +1422,6 @@ static void uclamp_fork(struct task_struct *p)
 	for_each_clamp_id(clamp_id)
 		p->uclamp[clamp_id].active = false;
 
-	p->uclamp_req[UCLAMP_MAX].ignore_uclamp_max = 0;
-
 	if (likely(!p->sched_reset_on_fork))
 		return;
 
@@ -1464,7 +1447,7 @@ static void __init init_uclamp_rq(struct rq *rq)
 		};
 	}
 
-	rq->uclamp_flags = 0;
+	rq->uclamp_flags = UCLAMP_FLAG_IDLE;
 }
 
 static void __init init_uclamp(void)
@@ -1480,8 +1463,6 @@ static void __init init_uclamp(void)
 		uclamp_se_set(&init_task.uclamp_req[clamp_id],
 			      uclamp_none(clamp_id), false);
 	}
-
-	init_task.uclamp_req[UCLAMP_MAX].ignore_uclamp_max = 0;
 
 	/* System defaults allow max clamp values for both indexes */
 	uclamp_se_set(&uc_max, uclamp_none(UCLAMP_MAX), false);
@@ -8566,14 +8547,14 @@ static void uclamp_set(struct cgroup_subsys_state *css)
 	int i;
 
 	static struct uclamp_param tgts[] = {
-		{"top-app",             "20", "max",  1, 20480},
+		{"top-app",             "10", "max",  1, 20480},
 		{"rt",			"0",  "max",  1, 20480},
 		{"nnapi-hal",		"0",  "max",  1, 20480},
-       		{"foreground",          "0",  "max",  1, 20480},
+       		{"foreground",          "0",  "80",  1, 20480},
                 {"camera-daemon",       "10", "max",  1, 20480},
                 {"system",              "0",  "max",  0, 20480},
-                {"dex2oat",             "0",  "60",   0,   512},
-        	{"background",          "0",  "50",   0,  1024},
+                {"dex2oat",             "0",  "30",   0,   512},
+        	{"background",          "0",  "30",   0,  1024},
         	{"system-background",   "0",  "50",   0,  1024},
 	};
 

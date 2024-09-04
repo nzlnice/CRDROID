@@ -337,12 +337,15 @@ static struct ctl_table sysctl_base_table[] = {
 
 static int min_sched_granularity_ns = 100000;		/* 100 usecs */
 static int max_sched_granularity_ns = NSEC_PER_SEC;	/* 1 second */
-static int min_wakeup_granularity_ns;			/* 0 usecs */
-static int max_wakeup_granularity_ns = NSEC_PER_SEC;	/* 1 second */
+
 #ifdef CONFIG_SMP
+#ifdef CONFIG_SCHED_DEBUG
+static int min_wakeup_granularity_ns;                   /* 0 usecs */
+static int max_wakeup_granularity_ns = NSEC_PER_SEC;    /* 1 second */
 static int min_sched_tunable_scaling = SCHED_TUNABLESCALING_NONE;
 static int max_sched_tunable_scaling = SCHED_TUNABLESCALING_END-1;
 #endif /* CONFIG_SMP */
+#endif
 
 #ifdef CONFIG_COMPACTION
 static int min_extfrag_threshold;
@@ -490,6 +493,20 @@ static struct ctl_table kern_table[] = {
 		.extra2		= &max_sched_granularity_ns,
 	},
 	{
+		.procname	= "sched_use_walt_cpu_util",
+		.data		= &sysctl_sched_use_walt_cpu_util,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "sched_use_walt_task_util",
+		.data		= &sysctl_sched_use_walt_task_util,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
 		.procname	= "sched_latency_ns",
 		.data		= &sysctl_sched_latency,
 		.maxlen		= sizeof(unsigned int),
@@ -498,6 +515,7 @@ static struct ctl_table kern_table[] = {
 		.extra1		= &min_sched_granularity_ns,
 		.extra2		= &max_sched_granularity_ns,
 	},
+#ifdef CONFIG_SCHED_DEBUG
 	{
 		.procname	= "sched_sync_hint_enable",
 		.data		= &sysctl_sched_sync_hint_enable,
@@ -538,7 +556,6 @@ static struct ctl_table kern_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
-#ifdef CONFIG_SCHED_DEBUG
 	{
 		.procname	= "sched_nr_migrate",
 		.data		= &sysctl_sched_nr_migrate,

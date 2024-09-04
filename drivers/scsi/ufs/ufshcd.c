@@ -423,6 +423,8 @@ static struct ufs_dev_fix ufs_fixups[] = {
 		UFS_DEVICE_QUIRK_NO_LINK_OFF),
 	UFS_FIX(UFS_VENDOR_WDC, UFS_ANY_MODEL,
 		UFS_DEVICE_QUIRK_NO_LINK_OFF),
+	UFS_FIX(UFS_VENDOR_MICRON, UFS_ANY_MODEL,
+		UFS_DEVICE_QUIRK_NO_LINK_OFF),
 	UFS_FIX(UFS_VENDOR_TOSHIBA, "THGLF2G9C8KBADG",
 		UFS_DEVICE_QUIRK_PA_TACTIVATE),
 	UFS_FIX(UFS_VENDOR_TOSHIBA, "THGLF2G9D8KBADG",
@@ -1805,9 +1807,9 @@ static int ufshcd_devfreq_scale(struct ufs_hba *hba, bool scale_up)
 	 */
 	if (ufshcd_is_auto_hibern8_enabled(hba)) {
 		ret = ufshcd_uic_hibern8_enter(hba);
+		/* link will be bad state so no need to scale_up_gear */
 		if (ret)
-			/* link will be bad state so no need to scale_up_gear */
-			return ret;
+			goto clk_scaling_unprepare;
 		ufshcd_custom_cmd_log(hba, "Hibern8-entered");
 	}
 
@@ -1818,9 +1820,9 @@ static int ufshcd_devfreq_scale(struct ufs_hba *hba, bool scale_up)
 
 	if (ufshcd_is_auto_hibern8_enabled(hba)) {
 		ret = ufshcd_uic_hibern8_exit(hba);
+		/* link will be bad state so no need to scale_up_gear */
 		if (ret)
-			/* link will be bad state so no need to scale_up_gear */
-			return ret;
+			goto clk_scaling_unprepare;
 		ufshcd_custom_cmd_log(hba, "Hibern8-Exited");
 	}
 
@@ -2557,8 +2559,8 @@ static void ufshcd_init_clk_gating(struct ufs_hba *hba)
 
 	snprintf(wq_name, ARRAY_SIZE(wq_name), "ufs_clk_gating_%d",
 			hba->host->host_no);
-	hba->clk_gating.clk_gating_workq =
-		create_singlethread_workqueue(wq_name);
+	hba->clk_gating.clk_gating_workq = alloc_ordered_workqueue(wq_name,
+					WQ_MEM_RECLAIM | WQ_HIGHPRI);
 
 	gating->is_enabled = true;
 
@@ -3671,7 +3673,7 @@ static void ufshcd_pm_qos_get_worker(struct work_struct *work)
 
 	mutex_lock(&hba->pm_qos.lock);
 	if (atomic_read(&hba->pm_qos.count) && !hba->pm_qos.active) {
-		pm_qos_update_request(&hba->pm_qos.req, 100);
+		pm_qos_update_request(&hba->pm_qos.req, 67);
 		hba->pm_qos.active = true;
 	}
 	mutex_unlock(&hba->pm_qos.lock);
@@ -4488,47 +4490,6 @@ int ufshcd_query_descriptor_retry(struct ufs_hba *hba,
 EXPORT_SYMBOL(ufshcd_query_descriptor_retry);
 
 /**
- * ufshcd_read_desc_length - read the specified descriptor length from header
- * @hba: Pointer to adapter instance
- * @desc_id: descriptor idn value
- * @desc_index: descriptor index
- * @desc_length: pointer to variable to read the length of descriptor
- *
- * Return 0 in case of success, non-zero otherwise
- */
-static int ufshcd_read_desc_length(struct ufs_hba *hba,
-	enum desc_idn desc_id,
-	int desc_index,
-	int *desc_length)
-{
-	int ret;
-	u8 header[QUERY_DESC_HDR_SIZE];
-	int header_len = QUERY_DESC_HDR_SIZE;
-
-	if (desc_id >= QUERY_DESC_IDN_MAX)
-		return -EINVAL;
-
-	ret = ufshcd_query_descriptor_retry(hba, UPIU_QUERY_OPCODE_READ_DESC,
-					desc_id, desc_index, 0, header,
-					&header_len);
-
-	if (ret) {
-		dev_err(hba->dev, "%s: Failed to get descriptor header id %d",
-			__func__, desc_id);
-		return ret;
-	} else if (desc_id != header[QUERY_DESC_DESC_TYPE_OFFSET]) {
-		dev_warn(hba->dev, "%s: descriptor header id %d and desc_id %d mismatch",
-			__func__, header[QUERY_DESC_DESC_TYPE_OFFSET],
-			desc_id);
-		ret = -EINVAL;
-	}
-
-	*desc_length = header[QUERY_DESC_LENGTH_OFFSET];
-	return ret;
-
-}
-
-/**
  * ufshcd_map_desc_id_to_length - map descriptor IDN to its length
  * @hba: Pointer to adapter instance
  * @desc_id: descriptor idn value
@@ -4597,7 +4558,6 @@ int ufshcd_read_desc_param(struct ufs_hba *hba,
 	int ret;
 	u8 *desc_buf;
 	int buff_len;
-	bool is_kmalloc = true;
 
 	/* Safety check */
 	if (desc_id >= QUERY_DESC_IDN_MAX || !param_size)
@@ -4632,15 +4592,16 @@ int ufshcd_read_desc_param(struct ufs_hba *hba,
 		return -EINVAL;
 	}
 
-	/* Check whether we need temp memory */
-	if (param_offset != 0 || param_size < buff_len) {
-		desc_buf = kzalloc(buff_len, GFP_KERNEL);
-		if (!desc_buf)
-			return -ENOMEM;
-	} else {
-		desc_buf = param_read_buf;
-		is_kmalloc = false;
+	/* Boundary check */
+	if (param_size == 0 || (param_offset + param_size) > buff_len) {
+		dev_err(hba->dev, "%s: Out of desc boundary or null size",
+			__func__);
+		return -EINVAL;
 	}
+
+	desc_buf = kmalloc(buff_len, GFP_KERNEL);
+	if (!desc_buf)
+		return -ENOMEM;
 
 	/* Request for full descriptor */
 	ret = ufshcd_query_descriptor_retry(hba, UPIU_QUERY_OPCODE_READ_DESC,
@@ -4661,15 +4622,9 @@ int ufshcd_read_desc_param(struct ufs_hba *hba,
 		goto out;
 	}
 
-	/* Check wherher we will not copy more data, than available */
-	if (is_kmalloc && param_offset + param_size > buff_len)
-		param_size = buff_len - param_offset;
-
-	if (is_kmalloc)
-		memcpy(param_read_buf, &desc_buf[param_offset], param_size);
+	memcpy(param_read_buf, &desc_buf[param_offset], param_size);
 out:
-	if (is_kmalloc)
-		kfree(desc_buf);
+	kfree(desc_buf);
 	return ret;
 }
 
@@ -4692,6 +4647,44 @@ static inline int ufshcd_read_power_desc(struct ufs_hba *hba,
 int ufshcd_read_device_desc(struct ufs_hba *hba, u8 *buf, u32 size)
 {
 	return ufshcd_read_desc(hba, QUERY_DESC_IDN_DEVICE, 0, buf, size);
+}
+
+/**
+ * ufshcd_read_desc_length - read the specified descriptor length from header
+ * @hba: Pointer to adapter instance
+ * @desc_id: descriptor idn value
+ * @desc_index: descriptor index
+ * @desc_length: pointer to variable to read the length of descriptor
+ *
+ * Return 0 in case of success, non-zero otherwise
+ */
+static int ufshcd_read_desc_length(struct ufs_hba *hba,
+	enum desc_idn desc_id,
+	int desc_index,
+	int *desc_length)
+{
+	int ret;
+	u8 header[QUERY_DESC_HDR_SIZE];
+	int header_len = QUERY_DESC_HDR_SIZE;
+
+	if (desc_id >= QUERY_DESC_IDN_MAX)
+		return -EINVAL;
+
+	ret = ufshcd_read_desc_param(hba, desc_id, desc_index,
+						0, header, header_len);
+	if (ret) {
+		dev_err(hba->dev, "%s: Failed to get descriptor header id %d",
+			__func__, desc_id);
+		return ret;
+	} else if (desc_id != header[QUERY_DESC_DESC_TYPE_OFFSET]) {
+		dev_warn(hba->dev, "%s: descriptor header id %d and desc_id %d mismatch",
+			__func__, header[QUERY_DESC_DESC_TYPE_OFFSET],
+			desc_id);
+		ret = -EINVAL;
+	}
+
+	*desc_length = header[QUERY_DESC_LENGTH_OFFSET];
+	return ret;
 }
 
 /**
@@ -6516,9 +6509,10 @@ static void __ufshcd_transfer_req_compl(struct ufs_hba *hba,
 					delta_us = ktime_us_delta(completion,
 						  req->lat_hist_io_start);
 					/* rq_data_dir() => true if WRITE */
-					blk_update_latency_hist(&hba->io_lat_s,
-						(rq_data_dir(req) == READ),
-						delta_us);
+					blk_update_latency_hist(
+						(rq_data_dir(req) == READ) ?
+						&hba->io_lat_read :
+						&hba->io_lat_write, delta_us);
 				}
 			}
 
@@ -7678,6 +7672,9 @@ static int ufshcd_issue_tm_cmd(struct ufs_hba *hba, int lun_id, int task_id,
 		if (ufshcd_clear_tm_cmd(hba, free_slot))
 			dev_WARN(hba->dev, "%s: unable clear tm cmd (slot %d) after timeout\n",
 					__func__, free_slot);
+		spin_lock_irqsave(host->host_lock, flags);
+		__clear_bit(free_slot, &hba->outstanding_tasks);
+		spin_unlock_irqrestore(host->host_lock, flags);
 		err = -ETIMEDOUT;
 	} else {
 		err = ufshcd_task_req_compl(hba, free_slot, tm_response);
@@ -7975,8 +7972,12 @@ static int ufshcd_host_reset_and_restore(struct ufs_hba *hba)
 	ufshcd_set_clk_freq(hba, true);
 
 	err = ufshcd_hba_enable(hba);
-	if (err)
+	if (err) {
+		/* ufshcd_probe_hba() will put it */
+		if (!ufshcd_eh_in_progress(hba) && !hba->pm_op_in_progress)
+			pm_runtime_put_sync(hba->dev);
 		goto out;
+	}
 
 	/* Establish the link again and restore the device */
 	err = ufshcd_probe_hba(hba);
@@ -8027,6 +8028,8 @@ static int ufshcd_reset_and_restore(struct ufs_hba *hba)
 	ufshcd_enable_irq(hba);
 
 	do {
+		if (!ufshcd_eh_in_progress(hba) && !hba->pm_op_in_progress)
+			pm_runtime_get_sync(hba->dev);
 		err = ufshcd_detect_device(hba);
 	} while (err && --retries);
 
@@ -8865,8 +8868,8 @@ reinit:
 		ufshcd_hba_stop(hba, false);
 		spin_unlock_irqrestore(hba->host->host_lock, flags);
 
-		err = ufshcd_hba_enable(hba);
-		if (err)
+		ret = ufshcd_hba_enable(hba);
+		if (ret)
 			goto out;
 
 		goto reinit;
@@ -10262,7 +10265,10 @@ static int ufshcd_suspend(struct ufs_hba *hba, enum ufs_pm_op pm_op)
 	     ((ufshcd_is_runtime_pm(pm_op) && !hba->auto_bkops_enabled) ||
 	       !ufshcd_is_runtime_pm(pm_op))) {
 		/* ensure that bkops is disabled */
-		ufshcd_disable_auto_bkops(hba);
+		ret = ufshcd_disable_auto_bkops(hba);
+		if (ret)
+			goto enable_gating;
+
 		ret = ufshcd_set_dev_pwr_mode(hba, req_dev_pwr_mode);
 		if (ret)
 			goto enable_gating;
@@ -10846,9 +10852,10 @@ latency_hist_store(struct device *dev, struct device_attribute *attr,
 
 	if (kstrtol(buf, 0, &value))
 		return -EINVAL;
-	if (value == BLK_IO_LAT_HIST_ZERO)
-		blk_zero_latency_hist(&hba->io_lat_s);
-	else if (value == BLK_IO_LAT_HIST_ENABLE ||
+	if (value == BLK_IO_LAT_HIST_ZERO) {
+		memset(&hba->io_lat_read, 0, sizeof(hba->io_lat_read));
+		memset(&hba->io_lat_write, 0, sizeof(hba->io_lat_write));
+	} else if (value == BLK_IO_LAT_HIST_ENABLE ||
 		 value == BLK_IO_LAT_HIST_DISABLE)
 		hba->latency_hist_enabled = value;
 	return count;
@@ -10859,8 +10866,14 @@ latency_hist_show(struct device *dev, struct device_attribute *attr,
 		  char *buf)
 {
 	struct ufs_hba *hba = dev_get_drvdata(dev);
+	size_t written_bytes;
 
-	return blk_latency_hist_show(&hba->io_lat_s, buf);
+	written_bytes = blk_latency_hist_show("Read", &hba->io_lat_read,
+			buf, PAGE_SIZE);
+	written_bytes += blk_latency_hist_show("Write", &hba->io_lat_write,
+			buf + written_bytes, PAGE_SIZE - written_bytes);
+
+	return written_bytes;
 }
 
 static DEVICE_ATTR(latency_hist, S_IRUGO | S_IWUSR,

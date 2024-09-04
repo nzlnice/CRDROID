@@ -42,17 +42,13 @@ static __latent_entropy void blk_done_softirq(struct softirq_action *h)
 static void trigger_softirq(void *data)
 {
 	struct request *rq = data;
-	unsigned long flags;
 	struct list_head *list;
 
-	local_irq_save(flags);
 	list = this_cpu_ptr(&blk_cpu_done);
 	list_add_tail(&rq->ipi_list, list);
 
 	if (list->next == &rq->ipi_list)
 		raise_softirq_irqoff(BLOCK_SOFTIRQ);
-
-	local_irq_restore(flags);
 }
 
 /*
@@ -105,7 +101,7 @@ void __blk_complete_request(struct request *req)
 	BUG_ON(!q->softirq_done_fn);
 
 	local_irq_save(flags);
-	cpu = smp_processor_id();
+	cpu = get_cpu();
 
 	/*
 	 * Select completion CPU
@@ -147,6 +143,7 @@ do_local:
 	} else if (raise_blk_irq(ccpu, req))
 		goto do_local;
 
+	put_cpu();
 	local_irq_restore(flags);
 }
 

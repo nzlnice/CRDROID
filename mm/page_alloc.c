@@ -319,9 +319,10 @@ compound_page_dtor * const compound_page_dtors[] = {
  * allocations below this point, only high priority ones. Automatically
  * tuned according to the amount of memory in the system.
  */
-int min_free_kbytes = 1024;
+int min_free_kbytes = 9456;
 int user_min_free_kbytes = -1;
-int watermark_scale_factor = 100;
+int watermark_scale_factor = 32;
+
 /*
  * Extra memory for the system to try freeing. Used to temporarily
  * free memory, to make space for new workloads. Anyone can allocate
@@ -2902,8 +2903,7 @@ static struct page *__rmqueue_pcplist(struct zone *zone, int migratetype,
 
 	do {
 		/* First try to get CMA pages */
-		if (migratetype == MIGRATE_MOVABLE &&
-				gfp_flags & __GFP_CMA) {
+		if (migratetype == MIGRATE_MOVABLE) {
 			list = get_populated_pcp_list(zone, 0, pcp,
 					get_cma_migrate_type(), cold);
 		}
